@@ -18,6 +18,11 @@
  * - code generation & fill in the middle
  */
 
+export enum ModelMode {
+    FIM = 'fillInTheMiddle',
+    TA = 'techAssisstant'
+}
+
 enum Model {
     starcoder = "starcoder", 
     mixtral = "mixtral",
@@ -37,13 +42,7 @@ interface TokenizerRepoConfig {
     repository: string;
 }
 
-// TODO: add more if want
-interface CustomOptions {
-    stop?: string[]
-    temperature?: number;
-    top_p?: number;
-    do_sample?: boolean;
-}
+
 interface FillInTheMiddle {
     prefix: string,
     middle: string,
@@ -62,7 +61,7 @@ export interface ModelConfig {
     contextWindow: number;
     fillInTheMiddle?: FillInTheMiddle;
     tokenizer?: TokenizerRepoConfig;
-    options?: CustomOptions
+    options?: Record<string, any>
 }
 
 // 7B 
@@ -78,6 +77,7 @@ const StarCoderConfig: ModelConfig = {
         stop: ["<|endoftext|>"],
         top_p: 0.95,
         do_sample: true,
+        max_new_tokens: 60
     },
     contextWindow: 8192,
     tokenizer: {
@@ -100,22 +100,10 @@ const CodeLlama13BConfig: ModelConfig = {
         temperature: 0.2,
         stop: ["<EOT>"],
         top_p: 0.95,
-        do_sample: true
+        do_sample: true,
+        max_new_tokens: 60
     }
 }
-
-// code generation
-// const CodeBooga: Config = {
-//     modelID: "codebooga",
-//     temperature: 1.31,
-//     top_p: 0.14, 
-
-// }
-
-// const Deepseek: Config = {
-//     modelID: "deepseek-coder",
-
-// }
 
 export const modelConfigs = {
     "starcoder": StarCoderConfig,

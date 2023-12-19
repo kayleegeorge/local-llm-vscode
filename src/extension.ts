@@ -1,115 +1,76 @@
 import * as vscode from 'vscode';
-import {
-	DocumentFilter,
-	LanguageClient,
-	LanguageClientOptions,
-	ServerOptions,
-	TransportKind
-} from 'vscode-languageclient/node';
-import { ModelConfig, modelConfigs } from './utils/modelConfig';
-import { homedir } from 'os';
+import { ModelConfig, ModelMode, modelConfigs } from './utils/modelConfig';
+import { CompletionRequest, CompletionResponse, Completions, pingOllama } from './server';
+import { CancellationToken } from 'vscode';
 
-// final completion 
-interface CompletionResponse {
-	model: string,
-	created_at: string,
-	response: string,
-	done: boolean,
-	// params below only exist on the last completion if STREAM
-	total_duration?: number,
-	load_duration?: number,
-	prompt_eval_count?: number,
-	prompt_eval_duration?: number,
-	eval_count?: number,
-	eval_duration?: number
-}
-
-let client: LanguageClient;
 
 const DEFAULT_OLLAMA_HOST = 'http://127.0.0.1:11434'; // or vscode.workspace.getConfiguration("ollama_server")?
+const spawn_server = 'ollama serve';
 
 export function activate(context: vscode.ExtensionContext) {
 
 	// say hello 
-	let disposable = vscode.commands.registerCommand('walmart-copilot.sayHello', () => {
+	let disposable = vscode.commands.registerCommand('walmart-copilot.helloWorld', () => {
 		vscode.window.showInformationMessage('Hello from walmart-copilot! #gocodecrazy');
 	});
 	context.subscriptions.push(disposable);
+
+	// push insert 
+	const afterInsert = vscode.commands.registerCommand('walmart-copilot.afterInsert', (response: Completions) => {
+		console.log(response);
+		return response.completions;
+	});
+	context.subscriptions.push(afterInsert);
+	
+	// test autocomplete 
+	const outputChannel = vscode.window.createOutputChannel('walmart copilot', { log: true });
+	let autocomplete = vscode.commands.registerCommand('walmart-copilot.autocomplete', async () => {
+		const suggestion = await getCodeSuggestion();
+		outputChannel.append(suggestion ?? '')
+		console.log(suggestion)
+	})
+	context.subscriptions.push(autocomplete)
 	
 	// TODO: handleModelConfigChange(context);
 	const config = vscode.workspace.getConfiguration("model");
-	
-	// TODO: figure out what this does??
-	const binaryPath: string | null = config.get("lsp.binaryPath") as string | null;
-	let command: string;
-	if (binaryPath) {
-		command = binaryPath;
-	} else {
-		const ext = process.platform === "win32" ? ".exe" : "";
-		command = vscode.Uri.joinPath(context.extensionUri, "server", `llm-ls${ext}`).fsPath;
-	}
-	if (command.startsWith("~/")) {
-		command = homedir() + command.slice("~".length);
-	}
 
-	// --inspect=6019: runs the server in Node's Inspector mode so VS Code can attach to the server for debugging
-	// let debugOptions = { execArgv: ['--nolazy', '--inspect=6029'] };
-
-	const serverOptions: ServerOptions = {
-		run: { command, transport: TransportKind.ipc },
-		debug: {
-			command,
-			transport: TransportKind.ipc,
-			// options: debugOptions // TODO: fix debug??
-		}
-	};
-
-	const outputChannel = vscode.window.createOutputChannel('walmart copilot', { log: true });
-	const clientOptions: LanguageClientOptions = {
-		documentSelector: [{ scheme: "*" }],
-		outputChannel,
-	};
-	client = new LanguageClient(
-		'model',
-		'walmart copilot',
-		serverOptions,
-		clientOptions
-	);
-
-	client.start();
-
-	// have to initiate suggestions for now with no delay
+	// TODO: have to initiate suggestions for now with no delay
 	const provider: vscode.InlineCompletionItemProvider = {
 		async provideInlineCompletionItems(document, position, context, token) {
-			// const config = vscode.workspace.getConfiguration("model");
+			console.log('provideInlineCompletionItems triggered');
+
+			const config = vscode.workspace.getConfiguration("model");
 			const modelConfig = modelConfigs['starcoder']; // FOR NOW HARDCODE
+
+			const requestDelay = config.get("requestDelay") as number;
+
 			if (position.line < 0) {
 				return;
 			}
-			const prompt = construct_prompt(position, document, modelConfig)
-			const request_params = {
-				model: modelConfig['modelID'],
-				prompt: prompt,
-				model_options: modelConfig['options'],
-				stream: false
-			};
+
+			if (requestDelay > 0){
+				const cancelled = await delay(requestDelay, token);
+				if (cancelled) return;
+			}
+
+			const request = construct_request(position, document, modelConfig);
 			try {
-				const response: CompletionResponse = await client.sendRequest(DEFAULT_OLLAMA_HOST, request_params);
+				const responses: Completions = await pingOllama(request);
 
 				let code_items: vscode.InlineCompletionItem[] = [];
-				// make this multiple responses for streaming
-				const completed_code: vscode.InlineCompletionItem = {
-					insertText: response.response,
-					// range: new vscode.Range(position, position),
-					// command: {
-					// 	title: 'afterInsert',
-					// 	command: 'model.afterInsert',
-					// 	arguments: [response],
-					// }
-				};
-				code_items.push(completed_code);
-				return code_items;
-
+				for (const completion of responses.completions) {
+					code_items.push({
+						insertText: completion, 
+						range: new vscode.Range(position, position),
+						command: {
+							title: 'afterInsert',
+							command: 'model.afterInsert',
+							arguments: [responses],
+						}
+					});
+				}
+				console.log(code_items);
+				return code_items; // why is it different for them?
 			} catch (e) {
 				const err_msg = (e as Error).message;
 				if (err_msg.includes("is currently loading")) {
@@ -120,17 +81,17 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 
 		},
-
 	};
-	const documentFilter = config.get("documentFilter") as DocumentFilter | DocumentFilter[];
-	vscode.languages.registerInlineCompletionItemProvider(documentFilter, provider);
+
+	vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, provider);
 }
 
-// make the prompt
-function construct_prompt(position: vscode.Position, document: vscode.TextDocument, modelConfig: ModelConfig) {
+// make the request
+function construct_request(position: vscode.Position, document: vscode.TextDocument, modelConfig: ModelConfig): CompletionRequest {
 	
 	// const text_document = client.code2ProtocolConverter.asTextDocumentIdentifier(document);
 	const max_context_window = modelConfig['contextWindow'];
+	const model_mode = ModelMode.FIM; // TODO: change
 	const FIM = modelConfig['fillInTheMiddle'];
 	// const tokenizer_config = modelConfig['tokenizer'];
 
@@ -149,14 +110,67 @@ function construct_prompt(position: vscode.Position, document: vscode.TextDocume
 	const suffix = document.getText(suffix_range);
 	
 	let prompt = FIM?.prefix + prefix + FIM?.suffix + suffix + FIM?.middle;
-	return prompt;
+
+	return {
+		model: modelConfig['modelID'],
+		prompt: prompt,
+		options: modelConfig['options'],
+		stream: false
+	};
+}
+
+async function getCodeSuggestion() {
+	const document = vscode.window.activeTextEditor?.document;
+	if (!document) return;
+	const position = vscode.window.activeTextEditor?.selection.active;
+	if (!position) return;
+	const modelConfig = modelConfigs['starcoder']; // FOR NOW HARDCODE 
+
+	const request = construct_request(position, document, modelConfig);
+		try {
+			const responses: Completions = await pingOllama(request);
+
+			let code_items = '';
+			for (const completion of responses.completions) {
+				code_items += completion;
+			}
+			console.log(code_items);
+			return code_items; // why is it different for them?
+		} catch (e) {
+			const err_msg = (e as Error).message;
+			if (err_msg.includes("is currently loading")) {
+				vscode.window.showWarningMessage(err_msg);
+			} else if (err_msg !== "Canceled") {
+				vscode.window.showErrorMessage(err_msg);
+			}
+		}	
+}
+
+async function delay(milliseconds: number, token: vscode.CancellationToken): Promise<boolean> {
+	/**
+	 * Wait for a number of milliseconds, unless the token is cancelled.
+	 * It is used to delay the request to the server, so that the user has time to type.
+	 *
+	 * @param milliseconds number of milliseconds to wait
+	 * @param token cancellation token
+	 * @returns a promise that resolves with false after N milliseconds, or true if the token is cancelled.
+	 *
+	 * @remarks This is a workaround for the lack of a debounce function in vscode.
+	*/
+    return new Promise<boolean>((resolve) => {
+        const interval = setInterval(() => {
+            if (token.isCancellationRequested) {
+                clearInterval(interval);
+                resolve(true)
+            }
+        }, 10); // Check every 10 milliseconds for cancellation
+
+        setTimeout(() => {
+            clearInterval(interval);
+            resolve(token.isCancellationRequested)
+        }, milliseconds);
+    });
 }
 
 // This method is called when your extension is deactivated
-export function deactivate() {
-	if (!client) {
-		return undefined;
-	}
-	return client.stop();
-}
-
+export function deactivate() {}

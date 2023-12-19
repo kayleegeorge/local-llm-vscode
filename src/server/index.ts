@@ -1,71 +1,88 @@
-// import {
-//   ParsedEvent,
-//   ReconnectInterval,
-//   createParser,
-// } from 'eventsource-parser';
-// import { ModelConfig } from '../utils/modelConfig';
 
-// export class OllamaError extends Error {
-//   constructor(message: string) {
-//     super(message);
-//     this.name = 'OllamaError';
-//   }
-// }
+// TODO: make this a vscode extension config setting: vscode.workspace.getConfiguration("ollama_server") 
+const DEFAULT_OLLAMA_HOST = 'http://127.0.0.1:11434';
 
-// // TODO: make this a vscode extension config setting: vscode.workspace.getConfiguration("ollama_server") 
-// const DEFAULT_OLLAMA_HOST = 'http://127.0.0.1:11434';
+export interface CompletionRequest {
+    model: string,
+    prompt: string,
+    options?: Record<string, any>,
+    systemPrompt?: string
+    stream?: boolean
+}
 
-// // Ollama stream
-// export const OllamaStream = async (
-//   modelConfig: ModelConfig,
-//   systemPrompt: string,
-//   prompt: string,
-// ) => {
-//   let url = `${DEFAULT_OLLAMA_HOST}/api/generate`;
-//   const res = await fetch(url, {
-//     headers: {
-//       'Accept': 'application/json',
-//       'Content-Type': 'application/json',
-//       'Cache-Control': 'no-cache',
-//       'Pragma': 'no-cache',
-//     },
-//     method: 'POST',
-//     body: JSON.stringify({
-//       model: modelConfig["modelID"],
-//       prompt: prompt,
-//       system: systemPrompt,
-//       options: modelConfig["options"]
-//     }),
-//   });
+// mid-way stream token response
+export interface PartCompletionResponse {
+	model: string,
+	created_at: string,
+	response: string,
+	done: boolean
+}
 
-//   const encoder = new TextEncoder();
-//   const decoder = new TextDecoder();
+// final completion response
+export interface FinalCompletionResponse {
+	model: string,
+	created_at: string,
+	response: string,
+	done: boolean,
+	total_duration: number,
+	load_duration: number,
+	prompt_eval_count: number,
+	prompt_eval_duration: number,
+	eval_count: number,
+	eval_duration: number
+}
 
-//   if (res.status !== 200) {
-//     const result = await res.json();
-//     if (result.error) {
-//       throw new OllamaError(
-//         result.error
-//       );
-//     } 
-//   }
+export type CompletionResponse = PartCompletionResponse | FinalCompletionResponse;
+export interface Completions {
+    completions: string[]
+}
 
-//   const responseStream = new ReadableStream({
-//     async start(controller) {
-//       try {
-//         for await (const chunk of res.body as any) {
-//           const text = decoder.decode(chunk); 
-//           const parsedData = JSON.parse(text); 
-//           if (parsedData.response) {
-//             controller.enqueue(encoder.encode(parsedData.response)); 
-//           }
-//         }
-//         controller.close();
-//       } catch (e) {
-//         controller.error(e);
-//       }
-//     },
-//   });
-  
-//   return responseStream;
-// };
+// Ollama stream
+export const pingOllama = async (
+    request: CompletionRequest,
+  ): Promise<Completions> => {
+    return new Promise(async (resolve, reject) => {
+        try {
+            const url = `${DEFAULT_OLLAMA_HOST}/api/generate`;
+            const body = {
+                'model': request.model,
+                'prompt': request.prompt
+            };
+            
+            const res = await fetch(url, {
+                headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+                // 'Cache-Control': 'no-cache',
+                // 'Pragma': 'no-cache',
+                },
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
+
+            if (!res.ok) {
+                reject('Network response was not ok');
+                return;
+            }
+            
+            const reader = res.body?.getReader();
+            let results: Completions = { completions: [] };
+        
+            if (reader) {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break
+            
+                    const chunk = new TextDecoder().decode(value);
+                    const parsedChunk: PartCompletionResponse = JSON.parse(chunk);
+            
+                    results.completions.push(parsedChunk.response);
+                }
+            }
+            resolve(results);
+        }
+        catch (err) {
+            reject(err);
+        }
+    });
+};
