@@ -33,8 +33,11 @@ export interface FinalCompletionResponse {
 }
 
 export type CompletionResponse = PartCompletionResponse | FinalCompletionResponse;
+export interface Completion {
+    code_complete: string
+}
 export interface Completions {
-    completions: string[]
+    completions: Completion[]
 }
 
 // Ollama stream
@@ -45,16 +48,15 @@ export const pingOllama = async (
         try {
             const url = `${DEFAULT_OLLAMA_HOST}/api/generate`;
             const body = {
-                'model': request.model,
-                'prompt': request.prompt
+                model: request.model,
+                prompt: request.prompt,
+                max_new_tokens: 60,
             };
             
             const res = await fetch(url, {
                 headers: {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
-                // 'Cache-Control': 'no-cache',
-                // 'Pragma': 'no-cache',
                 },
                 method: 'POST',
                 body: JSON.stringify(body),
@@ -66,20 +68,21 @@ export const pingOllama = async (
             }
             
             const reader = res.body?.getReader();
-            let results: Completions = { completions: [] };
+            let results: Completion[] = [];
         
             if (reader) {
                 while (true) {
                     const { done, value } = await reader.read();
-                    if (done) break
+                    if (done) break;
             
                     const chunk = new TextDecoder().decode(value);
                     const parsedChunk: PartCompletionResponse = JSON.parse(chunk);
             
-                    results.completions.push(parsedChunk.response);
+                    results.push({code_complete: parsedChunk.response});
+                    console.log(parsedChunk.response);
                 }
             }
-            resolve(results);
+            resolve({ completions: results });
         }
         catch (err) {
             reject(err);

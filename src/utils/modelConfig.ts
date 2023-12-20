@@ -80,9 +80,9 @@ const StarCoderConfig: ModelConfig = {
         max_new_tokens: 60
     },
     contextWindow: 8192,
-    tokenizer: {
-        repository: "bigcode/starcoder",
-    }
+    // tokenizer: {
+    //     repository: "bigcode/starcoder",
+    // }
 }
 
 const CodeLlama13BConfig: ModelConfig = {
